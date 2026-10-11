@@ -2,7 +2,7 @@
 import { useRef, useState } from 'react'
 import './App.css'
 
-const API = 'http://127.0.0.1:8000'
+const API = 'https://read-ministers-wrote-ebony.trycloudflare.com'
 
 function App() {
   const [question, setQuestion] = useState('')
@@ -332,3 +332,5 @@ function App() {
 }
 
 export default App
+
+
