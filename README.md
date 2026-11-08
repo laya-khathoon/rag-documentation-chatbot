@@ -46,9 +46,18 @@ cd rag-documentation-chatbot
 
 ### 2. Start the Backend
 
+Get a free Gemini API key from Google AI Studio
+(https://aistudio.google.com) and set it as an environment variable:
+
+```bash
+export GOOGLE_API_KEY="your-key-here"
+```
+
+Then install the dependencies and start the server:
+
 ```bash
 cd backend
-pip install fastapi uvicorn langchain chromadb sentence-transformers pymupdf
+pip install -r app/requirements.txt
 uvicorn app.main:app --reload
 ```
 
@@ -68,20 +77,35 @@ npm run dev
 
 Open the local URL displayed in the terminal.
 
-## Current Progress
+## How It Works
 
-- FastAPI backend initialized.
-- React frontend created using Vite.
-- Required RAG libraries installed.
-- Sample PDF added for testing.
-- Document retrieval endpoint under testing.
+1. An uploaded PDF is split into small text chunks.
+2. Each chunk is turned into an embedding (a list of numbers that
+   captures its meaning) with Google's embedding model and stored in a
+   Chroma vector database.
+3. A question is embedded the same way, and the database returns the
+   most similar chunks.
+4. The Gemini language model writes the answer using only those chunks,
+   and the app lists the source pages.
+
+## Deployment plan (not deployed yet)
+
+- Frontend: Vercel (https://rag-documentation-chatbot.vercel.app), with
+  the backend address set in the VITE_API_URL environment variable.
+- Backend: Render free web service (see render.yaml). The
+  GOOGLE_API_KEY environment variable must be set in the Render
+  dashboard. Free services sleep after 15 minutes without traffic and
+  take about a minute to wake up.
+- Privacy: each visitor's uploads are stored in their own session
+  collection, and the bundled documents/sample.pdf powers first-time
+  demos. On the Gemini free tier, Google may use content to improve its
+  products - do not upload private documents.
 
 ## Future Improvements
 
-- Improve document retrieval accuracy.
-- Generate contextual answers from retrieved content.
-- Build a user-friendly chatbot interface.
-- Support multiple PDF documents.
+- Restore reranking of retrieved chunks.
+- Support multiple PDF documents per session with delete/clear.
+- Show upload history per session.
 
 ## Author
 
