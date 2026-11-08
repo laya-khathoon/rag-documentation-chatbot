@@ -12,7 +12,9 @@ venv/
 vectorstore/
 
 # Uploaded documents
-documents/
+documents/*
+# ...except the bundled sample used for instant demos
+!documents/sample.pdf
 
 # Node
 node_modules/
@@ -24,3 +26,7 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+# Local session state
+**/sessions.json
+.env.*
+!.env.example
