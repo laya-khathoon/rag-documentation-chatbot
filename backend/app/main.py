@@ -1,18 +1,21 @@
-
+import json
 import os
 import re
+import secrets
+from datetime import datetime, timedelta, timezone
 
 import fitz
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
-from langchain_ollama import ChatOllama
+from langchain_google_genai import (
+    ChatGoogleGenerativeAI,
+    GoogleGenerativeAIEmbeddings,
+)
 from langchain_core.prompts import ChatPromptTemplate
-from sentence_transformers import CrossEncoder
 
 
 # --------------------------------------------------
@@ -42,29 +45,138 @@ text_splitter = RecursiveCharacterTextSplitter(
 # --------------------------------------------------
 # 3. EMBEDDINGS AND VECTOR STORE
 # --------------------------------------------------
+# Embeddings turn text into numbers so similar passages sit close
+# together. We use Google's hosted embedding model, so no model
+# needs to be downloaded or run on this server.
 
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
+embeddings = GoogleGenerativeAIEmbeddings(
+    model="models/gemini-embedding-001"
 )
 
-vectorstore = Chroma(
-    collection_name="documentation",
-    embedding_function=embeddings,
-    persist_directory=VECTORSTORE_DIR,
-)
+# Every visitor's browser sends an X-Session-Id header. Each session gets
+# its own Chroma collection, so one visitor's uploaded documents are never
+# visible to anyone else. A shared "public_sample" collection holds the
+# bundled sample PDF so a brand-new visitor can try a question right away.
+SAMPLE_COLLECTION = "public_sample"
+
+# --------------------------------------------------
+# SESSIONS
+# --------------------------------------------------
+# The backend issues unguessable session tokens. Every upload, search
+# and chat call must send one in the X-Session-Id header, and each
+# token maps to its own private Chroma collection. Tokens expire after
+# seven days; the visitor's browser simply asks for a new one.
+
+SESSIONS_FILE = os.path.join(VECTORSTORE_DIR, "sessions.json")
+SESSION_LIFETIME = timedelta(days=7)
+MAX_PDF_BYTES = 10 * 1024 * 1024  # 10 MB
+MAX_CHUNKS_PER_PDF = 3000
+MAX_DOCS_PER_SESSION = 10
+
+
+def load_sessions() -> dict:
+    try:
+        with open(SESSIONS_FILE) as sessions_file:
+            return json.load(sessions_file)
+    except Exception:
+        return {}
+
+
+def save_sessions(sessions: dict) -> None:
+    with open(SESSIONS_FILE, "w") as sessions_file:
+        json.dump(sessions, sessions_file)
+
+
+def prune_sessions(sessions: dict) -> dict:
+    cutoff = datetime.now(timezone.utc) - SESSION_LIFETIME
+    return {
+        token: created
+        for token, created in sessions.items()
+        if datetime.fromisoformat(created) > cutoff
+    }
+
+
+def valid_session(session_id: str | None) -> bool:
+    if not session_id:
+        return False
+    sessions = prune_sessions(load_sessions())
+    save_sessions(sessions)
+    return session_id in sessions
+
+
+def require_session(session_id: str | None) -> str:
+    if not valid_session(session_id):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or expired session. Reload the page to start a new one.",
+        )
+    return session_id
+
+
+def session_collection_name(session_id: str | None) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "", session_id or "")
+    if not safe:
+        return SAMPLE_COLLECTION
+    return f"session_{safe[:48]}"
+
+
+# Cosine distance: 0 means identical meaning, 2 means opposite.
+# Chunks farther than RELEVANCE_LIMIT from the question are treated as
+# "not in the document" so the app abstains instead of guessing.
+RELEVANCE_LIMIT = float(os.environ.get("RELEVANCE_LIMIT", "0.6"))
+
+
+def get_store(session_id: str | None) -> Chroma:
+    return Chroma(
+        collection_name=session_collection_name(session_id),
+        collection_metadata={"hnsw:space": "cosine"},
+        embedding_function=embeddings,
+        persist_directory=VECTORSTORE_DIR,
+    )
+
+
+def ensure_sample_indexed() -> Chroma | None:
+    """Index the bundled sample PDF once. Returns the sample store."""
+    sample_store = Chroma(
+        collection_name=SAMPLE_COLLECTION,
+        collection_metadata={"hnsw:space": "cosine"},
+        embedding_function=embeddings,
+        persist_directory=VECTORSTORE_DIR,
+    )
+    if sample_store._collection.count() > 0:
+        return sample_store
+
+    pdf_path = os.path.join(DOCUMENTS_DIR, "sample.pdf")
+    if not os.path.exists(pdf_path):
+        return None
+
+    try:
+        with open(pdf_path, "rb") as pdf_file:
+            chunks, metadatas, chunk_ids = extract_pdf_chunks(
+                pdf_file.read(),
+                "sample.pdf",
+            )
+        sample_store.add_texts(
+            texts=chunks,
+            metadatas=metadatas,
+            ids=chunk_ids,
+        )
+    except Exception:
+        return None
+
+    return sample_store
 
 
 # --------------------------------------------------
-# 4. LOCAL MODELS
+# 4. ANSWER MODEL
 # --------------------------------------------------
+# The language model writes the final answer from the retrieved
+# chunks. gemini-3.6-flash runs on Google's free API tier.
 
-llm = ChatOllama(
-    model="llama3.2:1b",
+llm = ChatGoogleGenerativeAI(
+    model="gemini-3.6-flash",
     temperature=0,
 )
-
-# Downloads this model the first time it is used.
-reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 
 # --------------------------------------------------
@@ -73,16 +185,28 @@ reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 app = FastAPI(
     title="RAG Documentation Chatbot",
-    description="A local RAG chatbot for technical documentation.",
-    version="2.0.0",
+    description="A RAG chatbot for technical documentation.",
+    version="3.0.0",
 )
+
+# Allowed websites that may call this API. The default list covers
+# local development and the live Vercel frontend; extra origins can
+# be added with the ALLOWED_ORIGINS environment variable
+# (comma-separated).
+default_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://rag-documentation-chatbot.vercel.app",
+]
+extra_origins = [
+    origin.strip()
+    for origin in os.environ.get("ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=default_origins + extra_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -149,38 +273,60 @@ def extract_pdf_chunks(pdf_bytes: bytes, filename: str):
 
 
 # --------------------------------------------------
-# 7. SHARED RETRIEVAL AND RERANKING
+# 7. RETRIEVAL
 # --------------------------------------------------
 
-def retrieve_relevant_chunks(question: str, candidate_count: int = 12):
-    # Retrieve a wider group of candidates using embeddings.
-    candidates = vectorstore.similarity_search(
-        question,
-        k=candidate_count,
-    )
+def extract_text(content) -> str:
+    """LangChain message content can be a plain string or a list of
+    content blocks (Gemini 3 returns blocks with signatures). Keep
+    only the human-readable text parts."""
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            parts.append(block.get("text", ""))
+    return "\n".join(part for part in parts if part)
 
-    if not candidates:
+
+def retrieve_relevant_chunks(
+    question: str,
+    session_id: str | None,
+    result_count: int = 5,
+):
+    # Find the chunks whose embeddings are closest to the question.
+    # Looks in the visitor's own session collection first; if they have
+    # not uploaded anything yet, falls back to the shared sample document.
+    session_store = get_store(session_id)
+    session_has_docs = session_store._collection.count() > 0
+
+    if session_has_docs:
+        # The visitor uploaded a PDF: answer only from their documents,
+        # and only when a chunk is close enough to the question.
+        results = session_store.similarity_search_with_score(
+            question,
+            k=result_count,
+        )
+        return [
+            (document, score)
+            for document, score in results
+            if score <= RELEVANCE_LIMIT
+        ]
+
+    # Nothing uploaded yet: let them try the bundled sample document.
+    sample_store = ensure_sample_indexed()
+    if sample_store is None:
         return []
-
-    # Rerank candidates using a cross-encoder that evaluates
-    # the question and each document chunk together.
-    pairs = [
-        (question, document.page_content)
-        for document in candidates
-    ]
-
-    scores = reranker.predict(pairs)
-
-    ranked = sorted(
-        zip(candidates, scores),
-        key=lambda item: float(item[1]),
-        reverse=True,
+    results = sample_store.similarity_search_with_score(
+        question,
+        k=result_count,
     )
-
-    # Keep the best five chunks for the final answer.
     return [
-        (document, float(score))
-        for document, score in ranked[:5]
+        (document, score)
+        for document, score in results
+        if score <= RELEVANCE_LIMIT
     ]
 
 
@@ -196,6 +342,15 @@ def home():
 @app.get("/health")
 def health():
     return {"status": "healthy"}
+
+
+@app.post("/session/new")
+def new_session():
+    sessions = prune_sessions(load_sessions())
+    token = "rag_" + secrets.token_urlsafe(32)
+    sessions[token] = datetime.now(timezone.utc).isoformat()
+    save_sessions(sessions)
+    return {"session_id": token, "expires_in_days": SESSION_LIFETIME.days}
 
 
 # --------------------------------------------------
@@ -220,7 +375,7 @@ def read_document():
         "sample.pdf",
     )
 
-    vectorstore.add_texts(
+    get_store(None).add_texts(
         texts=chunks,
         metadatas=metadatas,
         ids=chunk_ids,
@@ -238,7 +393,12 @@ def read_document():
 # --------------------------------------------------
 
 @app.post("/upload-document")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(
+    file: UploadFile = File(...),
+    x_session_id: str | None = Header(default=None),
+):
+    session_id = require_session(x_session_id)
+
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=400,
@@ -254,6 +414,12 @@ async def upload_document(file: UploadFile = File(...)):
                 detail="The uploaded PDF is empty.",
             )
 
+        if len(pdf_bytes) > MAX_PDF_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="PDF is too large. The limit is 10 MB.",
+            )
+
         filename = os.path.basename(file.filename)
 
         chunks, metadatas, chunk_ids = extract_pdf_chunks(
@@ -261,7 +427,27 @@ async def upload_document(file: UploadFile = File(...)):
             filename,
         )
 
-        vectorstore.add_texts(
+        if len(chunks) > MAX_CHUNKS_PER_PDF:
+            raise HTTPException(
+                status_code=413,
+                detail="This PDF produced too many text chunks.",
+            )
+
+        store = get_store(session_id)
+        existing_sources = {
+            metadata.get("source")
+            for metadata in store.get(include=["metadatas"])["metadatas"]
+        }
+        if (
+            filename not in existing_sources
+            and len(existing_sources) >= MAX_DOCS_PER_SESSION
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Session limit reached ({MAX_DOCS_PER_SESSION} documents).",
+            )
+
+        store.add_texts(
             texts=chunks,
             metadatas=metadatas,
             ids=chunk_ids,
@@ -289,7 +475,12 @@ async def upload_document(file: UploadFile = File(...)):
 # --------------------------------------------------
 
 @app.get("/search")
-def search_documents(query: str):
+def search_documents(
+    query: str,
+    x_session_id: str | None = Header(default=None),
+):
+    session_id = require_session(x_session_id)
+
     if not query.strip():
         raise HTTPException(
             status_code=400,
@@ -297,7 +488,11 @@ def search_documents(query: str):
         )
 
     try:
-        results = retrieve_relevant_chunks(query, candidate_count=12)
+        results = retrieve_relevant_chunks(
+            query,
+            session_id,
+            result_count=3,
+        )
 
         return {
             "query": query,
@@ -306,9 +501,9 @@ def search_documents(query: str):
                     "text": document.page_content,
                     "source": document.metadata.get("source", "Unknown"),
                     "page": document.metadata.get("page"),
-                    "reranker_score": round(score, 4),
+                    "similarity_score": round(float(score), 4),
                 }
-                for document, score in results[:3]
+                for document, score in results
             ],
         }
 
@@ -324,7 +519,12 @@ def search_documents(query: str):
 # --------------------------------------------------
 
 @app.post("/chat")
-def chat(request: ChatRequest):
+def chat(
+    request: ChatRequest,
+    x_session_id: str | None = Header(default=None),
+):
+    session_id = require_session(x_session_id)
+
     question = request.question.strip()
 
     if not question:
@@ -340,7 +540,8 @@ def chat(request: ChatRequest):
     try:
         results = retrieve_relevant_chunks(
             question,
-            candidate_count=12,
+            session_id,
+            result_count=5,
         )
 
         if not results:
@@ -390,6 +591,16 @@ Answer:"""
             "context": context,
             "question": question,
         })
+        answer = extract_text(response.content).strip()
+
+        if answer == fallback_answer:
+            # The model found no support in the excerpts: do not show
+            # sources for an answer that cites nothing.
+            return {
+                "question": question,
+                "answer": answer,
+                "sources": [],
+            }
 
         sources = [
             {
@@ -402,7 +613,7 @@ Answer:"""
 
         return {
             "question": question,
-            "answer": response.content,
+            "answer": answer,
             "sources": sources,
         }
 
@@ -410,8 +621,8 @@ Answer:"""
         raise HTTPException(
             status_code=503,
             detail=(
-                "Chat failed. Check that the embedding model, "
-                "reranker model, ChromaDB, and Ollama are available. "
+                "Chat failed. Check that the GOOGLE_API_KEY environment "
+                "variable is set and the Gemini API is reachable. "
                 f"Details: {str(exc)}"
             ),
         ) from exc
