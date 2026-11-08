@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: rag-chatbot-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install -r backend/app/requirements.txt
+    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: GOOGLE_API_KEY
+        sync: false
