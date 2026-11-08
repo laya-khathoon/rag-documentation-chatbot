@@ -2,7 +2,53 @@
 import { useRef, useState } from 'react'
 import './App.css'
 
-const API = 'https://read-ministers-wrote-ebony.trycloudflare.com'
+// Backend address. In production set VITE_API_URL in the Vercel project
+// settings; locally it falls back to the FastAPI dev server.
+const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+
+// The backend issues each browser an unguessable session token, kept in
+// localStorage. Every request sends it in the X-Session-Id header, and
+// the token maps to a private document collection for this browser only.
+async function ensureSessionId() {
+  const stored = window.localStorage.getItem('ragSessionId')
+  if (stored) return stored
+
+  const response = await fetch(`${API}/session/new`, { method: 'POST' })
+  if (!response.ok) throw new Error('Could not start a session.')
+
+  const data = await response.json()
+  window.localStorage.setItem('ragSessionId', data.session_id)
+  return data.session_id
+}
+
+// One automatic retry with a fresh token when the old one expired.
+async function apiFetch(path, options = {}) {
+  let sessionId = await ensureSessionId()
+  let response = await fetch(`${API}${path}`, {
+    ...options,
+    headers: { ...(options.headers || {}), 'X-Session-Id': sessionId },
+  })
+
+  if (response.status === 401) {
+    window.localStorage.removeItem('ragSessionId')
+    sessionId = await ensureSessionId()
+    response = await fetch(`${API}${path}`, {
+      ...options,
+      headers: { ...(options.headers || {}), 'X-Session-Id': sessionId },
+    })
+  }
+
+  return response
+}
+
+function renderMessageContent(content) {
+  // Render **bold** markers from the model as real bold text.
+  // Plain text stays escaped by React, so this is safe.
+  const parts = String(content).split(/\*\*([^*]+)\*\*/g)
+  return parts.map((part, index) =>
+    index % 2 === 1 ? <strong key={index}>{part}</strong> : part
+  )
+}
 
 function App() {
   const [question, setQuestion] = useState('')
@@ -34,7 +80,7 @@ function App() {
       const formData = new FormData()
       formData.append('file', file)
 
-      const response = await fetch(`${API}/upload-document`, {
+      const response = await apiFetch('/upload-document', {
         method: 'POST',
         body: formData,
       })
@@ -79,7 +125,7 @@ function App() {
     setLoading(true)
 
     try {
-      const response = await fetch(`${API}/chat`, {
+      const response = await apiFetch('/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -106,7 +152,7 @@ function App() {
         ...previous,
         {
           role: 'assistant',
-          content: `Could not get an answer: ${error.message}. Check that the backend and Ollama are running.`,
+          content: `Could not get an answer: ${error.message}. The backend may be waking up - wait a few seconds and try again.`,
           sources: [],
         },
       ])
@@ -115,7 +161,7 @@ function App() {
     }
   }
 
-  function useSuggestion(text) {
+  function sendSuggestion(text) {
     setQuestion(text)
   }
 
@@ -131,7 +177,7 @@ function App() {
 
         <span className="status">
           <span className="status-dot" />
-          Local AI
+          Cloud AI
         </span>
       </header>
 
@@ -204,7 +250,7 @@ function App() {
               type="button"
               className="suggestion"
               onClick={() =>
-                useSuggestion('What is the main topic of the document?')
+                sendSuggestion('What is the main topic of the document?')
               }
             >
               What is the main topic of the document?
@@ -215,7 +261,7 @@ function App() {
               type="button"
               className="suggestion"
               onClick={() =>
-                useSuggestion('Summarize the proposed approach.')
+                sendSuggestion('Summarize the proposed approach.')
               }
             >
               Summarize the proposed approach
@@ -233,7 +279,7 @@ function App() {
                   {message.role === 'user' ? 'You' : 'Assistant'}
                 </div>
 
-                <div className="message-content">{message.content}</div>
+                <div className="message-content">{renderMessageContent(message.content)}</div>
 
                 {message.role === 'assistant' &&
                   message.sources?.length > 0 && (
@@ -323,8 +369,9 @@ function App() {
         </button>
 
         <p className="input-note">
-          Powered by local Ollama · Your questions are processed on your
-          computer
+          Answers by Google Gemini (free tier) · Documents are processed
+          by Google's API and may be used to improve its products ·
+          Please don't upload private files
         </p>
       </form>
     </div>
@@ -332,5 +379,4 @@ function App() {
 }
 
 export default App
-
 
