@@ -1,2 +1,8 @@
 fastapi
-uvicorn
+uvicorn[standard]
+python-multipart
+pymupdf
+langchain-core
+langchain-text-splitters
+langchain-chroma
+langchain-google-genai
