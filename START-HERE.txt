@@ -1,4 +1,4 @@
-RAG Documentation Chatbot - fixed version
+PageSage (RAG Documentation Chatbot) - fixed version
 =========================================
 
 What this is:
