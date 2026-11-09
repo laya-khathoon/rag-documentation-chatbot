@@ -1,6 +1,6 @@
-# RAG Documentation Chatbot
+# PageSage
 
-An AI-powered chatbot that answers user questions based on information retrieved from uploaded documents using Retrieval-Augmented Generation (RAG).
+PageSage is an AI-powered chatbot that answers user questions based on information retrieved from uploaded documents using Retrieval-Augmented Generation (RAG). Ask your PDFs, and get answers with their source pages.
 
 ## Features
 
@@ -88,9 +88,11 @@ Open the local URL displayed in the terminal.
 4. The Gemini language model writes the answer using only those chunks,
    and the app lists the source pages.
 
-## Deployment plan (not deployed yet)
+## Deployment
 
-- Frontend: Vercel (https://rag-documentation-chatbot.vercel.app), with
+PageSage is live at https://rag-documentation-chatbot.vercel.app
+
+- Frontend: Vercel, with
   the backend address set in the VITE_API_URL environment variable.
 - Backend: Render free web service (see render.yaml). The
   GOOGLE_API_KEY environment variable must be set in the Render
