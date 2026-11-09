@@ -168,11 +168,11 @@ function App() {
   return (
     <div className="app">
       <header className="header">
-        <div className="brand-icon">R</div>
+        <div className="brand-icon">P</div>
 
         <div className="brand-text">
-          <h1>Documentation Chatbot</h1>
-          <p>Ask questions about your technical documents</p>
+          <h1>PageSage</h1>
+          <p>Ask your PDFs. Find answers with sources.</p>
         </div>
 
         <span className="status">
@@ -379,4 +379,3 @@ function App() {
 }
 
 export default App
-
