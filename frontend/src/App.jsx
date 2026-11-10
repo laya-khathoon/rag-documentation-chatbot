@@ -58,7 +58,21 @@ function App() {
   const [uploadStatus, setUploadStatus] = useState('')
   const [uploadError, setUploadError] = useState('')
   const [uploadedFiles, setUploadedFiles] = useState([])
+  const [serverWaking, setServerWaking] = useState(false)
   const fileInput = useRef(null)
+
+  // The free Render backend sleeps when idle and can take about a
+  // minute to wake up. If a request takes more than 8 seconds, tell
+  // the visitor what is happening instead of looking stuck.
+  async function apiFetchWithWakeNotice(path, options = {}) {
+    const wakeTimer = setTimeout(() => setServerWaking(true), 8000)
+    try {
+      return await apiFetch(path, options)
+    } finally {
+      clearTimeout(wakeTimer)
+      setServerWaking(false)
+    }
+  }
 
   async function uploadDocument(event) {
     const file = event.target.files?.[0]
@@ -80,7 +94,7 @@ function App() {
       const formData = new FormData()
       formData.append('file', file)
 
-      const response = await apiFetch('/upload-document', {
+      const response = await apiFetchWithWakeNotice('/upload-document', {
         method: 'POST',
         body: formData,
       })
@@ -125,7 +139,7 @@ function App() {
     setLoading(true)
 
     try {
-      const response = await apiFetch('/chat', {
+      const response = await apiFetchWithWakeNotice('/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -182,6 +196,24 @@ function App() {
       </header>
 
       <main className="chat-container">
+        {serverWaking && (
+          <p
+            role="status"
+            style={{
+              margin: 0,
+              padding: '10px 14px',
+              borderRadius: '10px',
+              background: '#20294a',
+              color: '#a5b4fc',
+              fontSize: '14px',
+              textAlign: 'center',
+            }}
+          >
+            Waking up the server - this can take about a minute on the
+            first request. Hang tight!
+          </p>
+        )}
+
         <section className="document-panel">
           <div className="document-panel-heading">
             <div>
