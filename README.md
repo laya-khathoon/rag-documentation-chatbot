@@ -35,14 +35,17 @@ PageSage is an AI-powered chatbot that answers user questions based on informati
 rag-documentation-chatbot/
 ├── backend/
 │   └── app/
-│       ├── main.py
-│       ├── config.py
-│       ├── api/
-│       ├── rag/
-│       └── services/
-├── frontend/
-├── documents/
-├── vectorstore/
+│       ├── main.py            # the whole FastAPI app lives in this one file
+│       └── requirements.txt
+├── frontend/                  # React + Vite app
+│   └── src/
+│       ├── App.jsx            # the main chat screen
+│       ├── App.css
+│       └── main.jsx
+├── documents/                 # bundled sample.pdf for first-time demos
+├── docs/                      # screenshots used in this README
+├── render.yaml                # Render deployment blueprint
+├── START-HERE.txt
 ├── README.md
 └── .gitignore
 ```
