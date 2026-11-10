@@ -2,6 +2,8 @@
 
 PageSage is an AI-powered chatbot that answers user questions based on information retrieved from uploaded documents using Retrieval-Augmented Generation (RAG). Ask your PDFs, and get answers with their source pages.
 
+[![Live demo](https://img.shields.io/badge/live%20demo-PageSage-brightgreen)](https://rag-documentation-chatbot.vercel.app)
+
 ## Screenshots
 
 ### Home screen
