@@ -2,6 +2,7 @@ import json
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 
 import fitz
@@ -15,6 +16,7 @@ from langchain_google_genai import (
     ChatGoogleGenerativeAI,
     GoogleGenerativeAIEmbeddings,
 )
+from langchain_core.embeddings import Embeddings
 from langchain_core.prompts import ChatPromptTemplate
 
 
@@ -49,8 +51,92 @@ text_splitter = RecursiveCharacterTextSplitter(
 # together. We use Google's hosted embedding model, so no model
 # needs to be downloaded or run on this server.
 
-embeddings = GoogleGenerativeAIEmbeddings(
-    model="models/gemini-embedding-001"
+class FreeTierEmbeddings(Embeddings):
+    """Pace Gemini embedding calls to stay inside the free tier.
+
+    Google's free embedding quota is 100 requests per minute and every
+    embedded text counts toward it. Indexing a long PDF used to fire
+    hundreds of requests in a few seconds, so the upload failed with a
+    429 RESOURCE_EXHAUSTED error. This wrapper keeps a rolling count
+    of the last minute, waits when the quota window is full, and
+    waits-and-retries (using Google's own retry delay) when a call is
+    still rejected.
+    """
+
+    REQUESTS_PER_MINUTE = 90  # stay safely under Google's 100
+    BATCH_SIZE = 25           # texts per embed call
+    MAX_RETRIES = 4           # retries per call after the first try
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._recent_calls = []  # one timestamp per embedded text
+
+    def _wait_for_room(self, count: int) -> None:
+        while True:
+            now = time.monotonic()
+            self._recent_calls = [
+                t for t in self._recent_calls if now - t < 60
+            ]
+            if len(self._recent_calls) + count <= self.REQUESTS_PER_MINUTE:
+                self._recent_calls.extend([time.monotonic()] * count)
+                return
+            time.sleep(max(60 - (now - self._recent_calls[0]), 1))
+
+    @staticmethod
+    def _is_quota_error(exc: Exception) -> bool:
+        text = str(exc)
+        return "429" in text or "RESOURCE_EXHAUSTED" in text
+
+    @staticmethod
+    def _retry_delay(exc: Exception, fallback: float) -> float:
+        match = re.search(
+            r"retry(?:Delay['\": ]+| in )([0-9.]+)\s*s",
+            str(exc),
+            re.IGNORECASE,
+        )
+        return float(match.group(1)) + 2 if match else fallback
+
+    def _call_with_retry(self, func, count: int, first_backoff: float):
+        backoff = first_backoff
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                self._wait_for_room(count)
+                return func()
+            except Exception as exc:
+                if attempt >= self.MAX_RETRIES or not self._is_quota_error(exc):
+                    raise
+                time.sleep(self._retry_delay(exc, backoff))
+                backoff = min(backoff * 2, 90)
+        raise HTTPException(  # unreachable, keeps type checkers happy
+            status_code=503,
+            detail="Embedding service is busy. Please try again.",
+        )
+
+    def embed_documents(self, texts):
+        vectors = []
+        for start in range(0, len(texts), self.BATCH_SIZE):
+            batch = texts[start:start + self.BATCH_SIZE]
+            vectors.extend(
+                self._call_with_retry(
+                    lambda: self._inner.embed_documents(batch),
+                    count=len(batch),
+                    first_backoff=30,
+                )
+            )
+        return vectors
+
+    def embed_query(self, text):
+        return self._call_with_retry(
+            lambda: self._inner.embed_query(text),
+            count=1,
+            first_backoff=20,
+        )
+
+
+embeddings = FreeTierEmbeddings(
+    GoogleGenerativeAIEmbeddings(
+        model="models/gemini-embedding-001"
+    )
 )
 
 # Every visitor's browser sends an X-Session-Id header. Each session gets
@@ -462,6 +548,14 @@ async def upload_document(
     except HTTPException:
         raise
     except Exception as exc:
+        if FreeTierEmbeddings._is_quota_error(exc):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Google's free embedding quota is busy right now. "
+                    "Please wait a minute and upload again."
+                ),
+            ) from exc
         raise HTTPException(
             status_code=500,
             detail=f"Could not process the PDF: {str(exc)}",
