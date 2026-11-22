@@ -257,12 +257,77 @@ def ensure_sample_indexed() -> Chroma | None:
 # 4. ANSWER MODEL
 # --------------------------------------------------
 # The language model writes the final answer from the retrieved
-# chunks. gemini-3.6-flash runs on Google's free API tier.
+# chunks. Gemini 2.5 Flash Lite has one of the largest free quotas
+# on Google's API (the newer Gemini 3.6 Flash allows only about 20
+# free requests per day, which a demo app exhausts in minutes).
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-3.6-flash",
+    model="gemini-2.5-flash-lite",
     temperature=0,
 )
+
+
+prompt_template = ChatPromptTemplate.from_template(
+    """You are a helpful documentation question-answering assistant.
+
+Answer the user's question using the supplied document excerpts.
+
+Rules:
+1. Answer the exact question directly.
+2. Use only facts supported by the excerpts.
+3. For questions about the document's main topic, title, objectives,
+   or proposed method, use relevant title, abstract, introduction,
+   and methodology information when present in the excerpts.
+4. Do not mistake acknowledgements, declarations, or references
+   for the document's main technical content.
+5. If the excerpts do not contain enough evidence, say:
+   "I could not find enough information in the provided document."
+6. Do not invent details or citations.
+7. Keep the answer clear and concise.
+
+Document excerpts:
+{context}
+
+Question:
+{question}
+
+Answer:"""
+)
+
+
+def invoke_llm_with_retry(chain_input):
+    """Call the answer model, retrying brief Google-side hiccups.
+
+    Free-tier models sometimes return a short-lived 503 (high demand)
+    or a per-minute 429. Wait a moment and retry instead of failing
+    the visitor's question. A per-day quota error is not retried:
+    it would only succeed after midnight Pacific time.
+    """
+    last_error = None
+    for attempt in range(3):
+        try:
+            return (prompt_template | llm).invoke(chain_input)
+        except Exception as exc:
+            last_error = exc
+            text = str(exc)
+            if "per day" in text.lower():
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "The free daily limit for answers is reached. "
+                        "It resets at midnight Pacific time - please "
+                        "try again tomorrow."
+                    ),
+                ) from exc
+            if attempt == 2 or not (
+                "503" in text
+                or "UNAVAILABLE" in text
+                or "429" in text
+                or "RESOURCE_EXHAUSTED" in text
+            ):
+                raise
+            time.sleep(5 * (attempt + 1))
+    raise last_error
 
 
 # --------------------------------------------------
@@ -654,34 +719,7 @@ def chat(
             for document, score in results
         )
 
-        prompt = ChatPromptTemplate.from_template(
-            """You are a helpful documentation question-answering assistant.
-
-Answer the user's question using the supplied document excerpts.
-
-Rules:
-1. Answer the exact question directly.
-2. Use only facts supported by the excerpts.
-3. For questions about the document's main topic, title, objectives,
-   or proposed method, use relevant title, abstract, introduction,
-   and methodology information when present in the excerpts.
-4. Do not mistake acknowledgements, declarations, or references
-   for the document's main technical content.
-5. If the excerpts do not contain enough evidence, say:
-   "I could not find enough information in the provided document."
-6. Do not invent details or citations.
-7. Keep the answer clear and concise.
-
-Document excerpts:
-{context}
-
-Question:
-{question}
-
-Answer:"""
-        )
-
-        response = (prompt | llm).invoke({
+        response = invoke_llm_with_retry({
             "context": context,
             "question": question,
         })
