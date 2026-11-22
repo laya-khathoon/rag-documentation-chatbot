@@ -257,12 +257,12 @@ def ensure_sample_indexed() -> Chroma | None:
 # 4. ANSWER MODEL
 # --------------------------------------------------
 # The language model writes the final answer from the retrieved
-# chunks. Gemini 2.5 Flash Lite has one of the largest free quotas
+# chunks. Gemini 3.5 Flash Lite has one of the largest free quotas
 # on Google's API (the newer Gemini 3.6 Flash allows only about 20
 # free requests per day, which a demo app exhausts in minutes).
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash-lite",
+    model="gemini-3.5-flash-lite",
     temperature=0,
 )
 
