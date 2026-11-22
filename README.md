@@ -43,12 +43,14 @@ rag-documentation-chatbot/
 │       ├── App.css
 │       └── main.jsx
 ├── documents/                 # bundled sample.pdf for first-time demos
-├── docs/                      # screenshots used in this README
+├── docs/                      # screenshots used in this README and ARCHITECTURE.md
 ├── render.yaml                # Render deployment blueprint
 ├── START-HERE.txt
 ├── README.md
 └── .gitignore
 ```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the frontend, backend, sessions and vector store fit together.
 
 ## Installation and Setup
 
