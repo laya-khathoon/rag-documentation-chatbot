@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import fitz
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
@@ -365,7 +365,7 @@ app.add_middleware(
 
 
 class ChatRequest(BaseModel):
-    question: str
+    question: str = Field(min_length=1, max_length=8000)
 
 
 # --------------------------------------------------
@@ -557,7 +557,7 @@ async def upload_document(
         )
 
     try:
-        pdf_bytes = await file.read()
+        pdf_bytes = await file.read(MAX_PDF_BYTES + 1)
 
         if not pdf_bytes:
             raise HTTPException(
@@ -623,7 +623,7 @@ async def upload_document(
             ) from exc
         raise HTTPException(
             status_code=500,
-            detail=f"Could not process the PDF: {str(exc)}",
+            detail="Could not process the PDF. Check that it is a readable PDF and try again.",
         ) from exc
     finally:
         await file.close()
@@ -639,6 +639,9 @@ def search_documents(
     x_session_id: str | None = Header(default=None),
 ):
     session_id = require_session(x_session_id)
+
+    if len(query) > 8000:
+        raise HTTPException(status_code=400, detail="Search query is too long.")
 
     if not query.strip():
         raise HTTPException(
@@ -669,7 +672,7 @@ def search_documents(
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail=f"Document search failed: {str(exc)}",
+            detail="Document search is unavailable right now. Try again later.",
         ) from exc
 
 
@@ -753,8 +756,6 @@ def chat(
         raise HTTPException(
             status_code=503,
             detail=(
-                "Chat failed. Check that the GOOGLE_API_KEY environment "
-                "variable is set and the Gemini API is reachable. "
-                f"Details: {str(exc)}"
+                "Chat is unavailable right now. Please try again later."
             ),
         ) from exc
